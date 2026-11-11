@@ -179,23 +179,11 @@
   const photoInput=$('photo-order-image'), cameraInput=$('photo-order-camera'), photoStatus=$('photo-order-status'), photoUnknown=$('photo-order-unknown'), photoUnknownList=$('photo-order-unknown-list');
   function setPhotoStatus(message,type=''){photoStatus.textContent=message;photoStatus.className='photo-order-status'+(type?' '+type:'');}
   function fileToBase64(file){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>{const result=String(reader.result||'');resolve(result.includes(',')?result.split(',')[1]:result);};reader.onerror=()=>reject(new Error('Photo read nahi ho payi.'));reader.readAsDataURL(file);});}
-  function normalizePhotoText(value){return String(value||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');}
+  function normalizePhotoText(value){return String(value||'').toLowerCase().replace(/\b(tab|tablet|tabs|cap|capsule|syrup|inj|injection)\b/g,' ').replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');}
   function editDistance(a,b){const prev=Array.from({length:b.length+1},(_,i)=>i);for(let i=1;i<=a.length;i++){let diag=prev[0];prev[0]=i;for(let j=1;j<=b.length;j++){const old=prev[j];prev[j]=Math.min(prev[j]+1,prev[j-1]+1,diag+(a[i-1]===b[j-1]?0:1));diag=old;}}return prev[b.length];}
-  function photoMatchScore(needle,product){
-    const q=normalizePhotoText(needle), name=normalizePhotoText(product.name), desc=normalizePhotoText(product.description), pack=normalizePhotoText(product.pack);
-    if(!q||!name)return 0;if(q===name)return 100;if(name.includes(q)||q.includes(name))return 91;
-    const qt=q.split(' ').filter(x=>x.length>2), nt=(name+' '+pack+' '+desc).split(' ').filter(x=>x.length>2);if(!qt.length)return 0;
-    const matched=qt.filter(t=>nt.some(n=>n===t||(Math.min(t.length,n.length)>=5&&editDistance(t,n)<=Math.max(1,Math.floor(Math.min(t.length,n.length)*.22))))).length;
-    return Math.round((matched/qt.length)*84);
-  }
-  async function findPhotoProduct(lineName){
-    const cleaned=String(lineName||'').trim().replace(/[,%()]/g,' ');if(!cleaned)return null;
-    const tokens=cleaned.split(/\s+/).filter(x=>x.length>2);const searches=[cleaned,...tokens.slice(0,2)].slice(0,3);let found=new Map();
-    const results=await Promise.all(searches.map(async term=>{const safe=term.replace(/[%_,]/g,' ').trim();if(!safe)return {data:[],error:null};return await dbClient.from('products').select('id,name,category,description,is_active,image_url,net_rate,selling_price,mrp,deal_scheme,trade,trade_down,pack,stock_qty').eq('is_active',true).or(`name.ilike.%${safe}%,description.ilike.%${safe}%,pack.ilike.%${safe}%`).limit(12);}));
-    for(const result of results){if(result.error)throw result.error;(result.data||[]).forEach(p=>found.set(String(p.id),p));}
-    const ranked=[...found.values()].map(p=>({product:p,score:photoMatchScore(lineName,p)})).sort((a,b)=>b.score-a.score);
-    return ranked.length&&ranked[0].score>=58?ranked[0].product:null;
-  }
+  function wordSimilarity(a,b){if(a===b)return 1;if(!a||!b)return 0;if(a.startsWith(b)||b.startsWith(a)){const short=Math.min(a.length,b.length),long=Math.max(a.length,b.length);if(short>=4&&long-short<=2)return .94;}const d=editDistance(a,b),len=Math.max(a.length,b.length);if(Math.min(a.length,b.length)>=4&&d<=Math.max(1,Math.floor(len*.28)))return 1-d/len;return 0;}
+  function photoMatchScore(needle,product){const q=normalizePhotoText(needle),name=normalizePhotoText(product.name),desc=normalizePhotoText(product.description),pack=normalizePhotoText(product.pack);if(!q||!name)return 0;if(q===name)return 100;const qt=q.split(' ').filter(x=>x.length>2),nt=[...new Set((name+' '+pack+' '+desc).split(' ').filter(x=>x.length>2))];if(!qt.length)return 0;let total=0,matched=0;for(const token of qt){let best=0;for(const candidate of nt)best=Math.max(best,wordSimilarity(token,candidate));if(best>=.68){matched++;total+=best;}}const coverage=matched/qt.length,quality=matched?total/matched:0,firstBest=Math.max(0,...nt.map(t=>wordSimilarity(qt[0],t)));return Math.round((coverage*.62+quality*.28+firstBest*.10)*100);}
+  async function findPhotoProduct(lineName){const cleaned=String(lineName||'').trim().replace(/[,%()]/g,' ');if(!cleaned)return null;const tokens=normalizePhotoText(cleaned).split(/\s+/).filter(x=>x.length>2);const searches=[cleaned,...tokens.slice(0,3)].slice(0,4),found=new Map();const results=await Promise.all(searches.map(async term=>{const safe=term.replace(/[%_,]/g,' ').trim();if(!safe)return {data:[],error:null};return await dbClient.from('products').select('id,name,category,description,is_active,image_url,net_rate,selling_price,mrp,deal_scheme,trade,trade_down,pack,stock_qty').eq('is_active',true).or(`name.ilike.%${safe}%,description.ilike.%${safe}%,pack.ilike.%${safe}%`).limit(30);}));for(const result of results){if(result.error)throw result.error;(result.data||[]).forEach(product=>found.set(String(product.id),product));}const ranked=[...found.values()].map(product=>({product,score:photoMatchScore(lineName,product)})).sort((a,b)=>b.score-a.score);if(!ranked.length||ranked[0].score<72)return null;if(ranked[1]&&ranked[0].score-ranked[1].score<7)return null;return ranked[0].product;}
   function addPhotoReviewRow(item){
     const row=document.createElement('div');row.className='photo-review-row';
     const name=document.createElement('input');name.type='text';name.value=item.name||'';name.setAttribute('aria-label','Product name - edit spelling');
@@ -216,7 +204,7 @@
       if(error)throw new Error(error.message||'Photo reading service se response nahi mila.');
       const lines=Array.isArray(data?.items)?data.items:[];if(!lines.length)throw new Error('Photo se product list read nahi hui. Kripya clear photo upload karein.');
       setPhotoStatus('Naam aur catalogue match check ho rahe hain…','loading');
-      const checked=await Promise.all(lines.map(async line=>{const name=String(line.name||'').trim(),qty=Math.max(1,Math.floor(Number(line.quantity)||1));if(!name)return null;const product=line.uncertain?null:await findPhotoProduct(name);return {name,quantity:qty,product,uncertain:Boolean(line.uncertain)};}));
+      const checked=await Promise.all(lines.map(async line=>{const name=String(line.name||'').trim(),qty=Math.max(1,Math.floor(Number(line.quantity)||1));if(!name)return null;const product=await findPhotoProduct(name);return {name,quantity:qty,product,uncertain:Boolean(line.uncertain)};}));
       let matched=0;const review=[];
       for(const item of checked.filter(Boolean)){if(!item.product){review.push(item);continue;}const product=item.product,key=String(product.id),max=stockLimit(product);if(max<1){review.push({...item,product:null,uncertain:true});continue;}const previous=selected.get(key);selected.set(key,{product,qty:Math.min(max,(previous?Number(previous.qty)||0:0)+item.quantity),unit:isTabletCapsule(product)?'Strip':'Unit'});matched++;}
       review.forEach(addPhotoReviewRow);photoUnknown.hidden=!review.length;renderSelected();document.querySelectorAll('[data-product-check]').forEach(cb=>{cb.checked=selected.has(String(cb.dataset.productCheck));});
