@@ -146,7 +146,21 @@
   // Photo-to-order: separate file picker and camera; uncertain OCR lines stay editable for correction.
   const photoInput=$('photo-order-image'), cameraInput=$('photo-order-camera'), photoStatus=$('photo-order-status'), photoUnknown=$('photo-order-unknown'), photoUnknownList=$('photo-order-unknown-list');
   function setPhotoStatus(message,type=''){photoStatus.textContent=message;photoStatus.className='photo-order-status'+(type?' '+type:'');}
-  function fileToBase64(file){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>{const result=String(reader.result||'');resolve(result.includes(',')?result.split(',')[1]:result);};reader.onerror=()=>reject(new Error('Photo read nahi ho payi.'));reader.readAsDataURL(file);});}
+  async function fileToBase64(file){
+    let bitmap=null,source=null,width=0,height=0;
+    try{
+      if('createImageBitmap' in window){bitmap=await createImageBitmap(file);source=bitmap;width=bitmap.width;height=bitmap.height;}
+      else{source=await new Promise((resolve,reject)=>{const image=new Image(),url=URL.createObjectURL(file);image.onload=()=>{URL.revokeObjectURL(url);resolve(image);};image.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('Photo open nahi ho payi.'));};image.src=url;});width=source.naturalWidth;height=source.naturalHeight;}
+      if(!width||!height)throw new Error('Photo ka size read nahi ho paya.');
+      const scale=Math.min(1,1600/Math.max(width,height)),canvas=document.createElement('canvas');
+      canvas.width=Math.max(1,Math.round(width*scale));canvas.height=Math.max(1,Math.round(height*scale));
+      const ctx=canvas.getContext('2d',{alpha:false});if(!ctx)throw new Error('Photo compression supported nahi hai.');
+      ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(source,0,0,canvas.width,canvas.height);
+      const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.78));if(!blob)throw new Error('Photo compress nahi ho payi.');
+      const result=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result||'').split(',')[1]||'');reader.onerror=()=>reject(new Error('Compressed photo read nahi ho payi.'));reader.readAsDataURL(blob);});
+      if(!result)throw new Error('Compressed photo empty hai.');return {imageBase64:result,mimeType:'image/jpeg',size:blob.size};
+    }finally{if(bitmap)bitmap.close();}
+  }
   function normalizePhotoText(value){return String(value||'').toLowerCase().replace(/\b(tab|tablet|tabs|cap|capsule|syrup|inj|injection)\b/g,' ').replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');}
   function editDistance(a,b){const prev=Array.from({length:b.length+1},(_,i)=>i);for(let i=1;i<=a.length;i++){let diag=prev[0];prev[0]=i;for(let j=1;j<=b.length;j++){const old=prev[j];prev[j]=Math.min(prev[j]+1,prev[j-1]+1,diag+(a[i-1]===b[j-1]?0:1));diag=old;}}return prev[b.length];}
   function wordSimilarity(a,b){if(a===b)return 1;if(!a||!b)return 0;if(a.startsWith(b)||b.startsWith(a)){const short=Math.min(a.length,b.length),long=Math.max(a.length,b.length);if(short>=4&&long-short<=2)return .94;}const d=editDistance(a,b),len=Math.max(a.length,b.length);if(Math.min(a.length,b.length)>=4&&d<=Math.max(1,Math.floor(len*.28)))return 1-d/len;return 0;}
@@ -216,11 +230,11 @@
   async function handlePhotoOrder(file,input){
     if(!dbClient){setPhotoStatus('Catalogue abhi connect nahi hua hai. Page refresh karke dobara try karein.','error');return;}
     if(!file)return;if(!/^image\/(jpeg|png|webp)$/.test(file.type)){setPhotoStatus('Sirf JPG, PNG ya WEBP photo upload karein.','error');return;}
-    if(file.size>8*1024*1024){setPhotoStatus('Photo 8 MB se chhoti honi chahiye.','error');return;}
+    if(file.size>15*1024*1024){setPhotoStatus('Photo 15 MB se chhoti honi chahiye.','error');return;}
     photoInput.disabled=true;cameraInput.disabled=true;photoUnknown.hidden=true;photoUnknownList.innerHTML='';setPhotoStatus('Photo upload ho rahi hai…','loading');
     try{
-      const imageBase64=await fileToBase64(file);setPhotoStatus('AI aapki list padh rahi hai… kripya thoda intezaar karein.','loading');
-      const {data,error}=await dbClient.functions.invoke('photo-order-ocr',{body:{imageBase64,mimeType:file.type}});
+      const optimized=await fileToBase64(file);setPhotoStatus('Photo optimize ho gayi ('+Math.max(1,Math.round(optimized.size/1024))+' KB). AI aapki list padh rahi hai…','loading');
+      const {data,error}=await dbClient.functions.invoke('photo-order-ocr',{body:{imageBase64:optimized.imageBase64,mimeType:optimized.mimeType}});
       if(error)throw new Error(error.message||'Photo reading service se response nahi mila.');
       const lines=Array.isArray(data?.items)?data.items:[];if(!lines.length)throw new Error('Photo se product list read nahi hui. Kripya clear photo upload karein.');
       setPhotoStatus('Naam aur catalogue match check ho rahe hain…','loading');
