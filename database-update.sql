@@ -1,3 +1,0 @@
--- Superseded by medisupply_update.sql in this corrected package.
--- The consolidated SQL already adds deal_scheme safely.
--- Do not run both files separately.
